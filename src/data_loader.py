@@ -127,12 +127,23 @@ def encode_and_scale(df: pd.DataFrame, categorical_cols: Optional[List[str]] = N
     df = df.copy()
     if categorical_cols is None:
         categorical_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    else:
+        # Filter requested categorical columns to those actually present in df
+        present = [c for c in categorical_cols if c in df.columns]
+        missing = [c for c in categorical_cols if c not in df.columns]
+        if missing:
+            logger.warning("Requested categorical columns %s not found in DataFrame — ignoring: %s", categorical_cols, missing)
+        categorical_cols = present
+
     # exclude label if present
     if "label" in categorical_cols:
-        categorical_cols.remove("label")
+        categorical_cols = [c for c in categorical_cols if c != "label"]
 
-    logger.info("Encoding categorical columns: %s", categorical_cols)
-    df = pd.get_dummies(df, columns=categorical_cols, drop_first=False)
+    # If no categorical columns remain, let pandas infer by passing None
+    cols_for_dummies = categorical_cols if (categorical_cols and len(categorical_cols) > 0) else None
+
+    logger.info("Encoding categorical columns: %s", cols_for_dummies)
+    df = pd.get_dummies(df, columns=cols_for_dummies, drop_first=False)
 
     feature_cols = [c for c in df.columns if c != "label"]
 
@@ -155,7 +166,18 @@ def preprocess(df: pd.DataFrame, label_col: str = "label", categorical_cols: Opt
     df_clean = clean_data(df)
 
     if label_col not in df_clean.columns:
-        raise ValueError(f"Label column '{label_col}' not found in DataFrame")
+        # Attempt a safe fallback: infer label from a Filename column if present.
+        # Many exported sample CSVs include a `Filename` field like
+        # 'Spyware-...-<id>.raw' — we can take the prefix before the first
+        # separator as a coarse label. This keeps the pipeline usable when
+        # CSVs don't include an explicit 'label' column.
+        if "Filename" in df_clean.columns:
+            logger.warning("Label column '%s' not found — inferring labels from 'Filename' column", label_col)
+            inferred = df_clean["Filename"].astype(str).str.split("[-_.]").str[0]
+            # Write inferred values into the desired label_col name
+            df_clean[label_col] = inferred
+        else:
+            raise ValueError(f"Label column '{label_col}' not found in DataFrame")
 
     y = df_clean[label_col].apply(lambda x: 1 if str(x).lower() != "benign" and str(x).lower() != "normal" else 0)
 
